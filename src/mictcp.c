@@ -5,6 +5,7 @@
 //Tableau contenant les mic_tcp_sock référencés par leur fd
 #define MAX_SOCKET 100
 mic_tcp_sock tab[MAX_SOCKET];
+int done = 0;  // Tableau initialisé si 1
 
 mic_tcp_sock *get_socket(int fd){
     if (fd < 0 || fd >= MAX_SOCKET){
@@ -13,6 +14,9 @@ mic_tcp_sock *get_socket(int fd){
     return &tab[fd];
 }
 
+int current_seq_num = 0;
+int expected_seq_num = 0;
+
 
 /*
  * Permet de créer un socket entre l’application et MIC-TCP
@@ -20,10 +24,18 @@ mic_tcp_sock *get_socket(int fd){
  */
 int mic_tcp_socket(start_mode sm)
 {
+    if (!done){
+        for (int i = 0; i < MAX_SOCKET; i++){
+            int fd = initialize_components(sm);
+            tab[i].fd = fd;
+            tab[i].state = CLOSED;
+        }
+    } done = 1;
+
    int result = -1;
    printf("[MIC-TCP] Appel de la fonction: ");  printf(__FUNCTION__); printf("\n");
    result = initialize_components(sm); /* Appel obligatoire */
-   set_loss_rate(0);
+   set_loss_rate(10);
    if(result<0){
         return -1;
    }
@@ -33,14 +45,16 @@ int mic_tcp_socket(start_mode sm)
             fd_place = i;
             break;
         }
+    } 
+    if (fd_place == -1){
+        return -1;
     }
-   
     tab[fd_place].fd = result;
     tab[fd_place].state = IDLE;
-   return tab[fd_place].fd;
+    return tab[fd_place].fd;
 }
 
-/*
+/* 
  * Permet d’attribuer une adresse à un socket.
  * Retourne 0 si succès, et -1 en cas d’échec
  */
@@ -93,19 +107,36 @@ int mic_tcp_send (int socket, char* mesg, int mesg_size)
     }
 
     // Construire PDU
+    printf("on construit le pdu");
     mic_tcp_pdu pdu;
+
     pdu.header.source_port = s->local_addr.port;
     pdu.header.dest_port = s->remote_addr.port;
     pdu.payload.data = mesg;
     pdu.payload.size = mesg_size;
+    pdu.header.seq_num = current_seq_num;
 
-    //Envoyer le PDU
-    int effective_send = IP_send(pdu, s->remote_addr.ip_addr);
+     unsigned long timeout = 1000;
+     mic_tcp_pdu pdu_ack;
+    // Envoyer pdu et attendre ACK (Stop & Wait)
+    do{
+        IP_send(pdu, s->remote_addr.ip_addr);
+        int result = IP_recv(&pdu_ack, &s->local_addr, &s->remote_addr, timeout);
+        printf(result);
+        if(result >= 0) {
+            printf("On a reçu un pdu_ack\n");
+        } else {
+            printf("Un timeout s'est produit\n");
+        }
+        printf("on a envoyé pdu et on att le ack\n");
+        printf("on a reçu un pdu_ack avec: header.ack = %d et ack_num = %d; on avait current_seq_num = %d\n", pdu_ack.header.ack, pdu_ack.header.ack_num, current_seq_num);
+    }while(!(pdu_ack.header.ack==1) && !(pdu_ack.header.ack_num==current_seq_num));
+    printf("y a pas eu de perte\n");
+   
+    // Alterner le num de sequence
+    current_seq_num = 1 - current_seq_num;
 
-    //Attendre ACK
-    mic_tcp_pdu pdu_ack;
-    unsigned long timeout = 1000;
-    IP_recv(&pdu_ack, &s->local_addr, &s->remote_addr, timeout);
+    return mesg_size;
 }
 
 /*
@@ -150,8 +181,12 @@ void process_received_PDU(mic_tcp_pdu pdu, mic_tcp_ip_addr local_addr, mic_tcp_i
 {
     printf("[MIC-TCP] Appel de la fonction: "); printf(__FUNCTION__); printf("\n");
 
-    // Ajouter la donnée au buffer de réception
-    app_buffer_put(pdu.payload);
+    if (pdu.header.seq_num == expected_seq_num) {
+        // Ajouter la donnée au buffer de réception
+        app_buffer_put(pdu.payload);
+        // Màj le prochain num de sequence attendu
+        expected_seq_num = 1 - expected_seq_num;
+    }
 
     // Construire et envoyer un ACK
     mic_tcp_pdu pdu_ack;
@@ -163,3 +198,6 @@ void process_received_PDU(mic_tcp_pdu pdu, mic_tcp_ip_addr local_addr, mic_tcp_i
 
     IP_send(pdu_ack, remote_addr);
 }
+
+
+// Dans send(), penser au cas où se produit un timeout dans la partie while(!...)
