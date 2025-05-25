@@ -35,7 +35,7 @@ int mic_tcp_socket(start_mode sm)
    int result = -1;
    printf("[MIC-TCP] Appel de la fonction: ");  printf(__FUNCTION__); printf("\n");
    result = initialize_components(sm); /* Appel obligatoire */
-   set_loss_rate(10);
+   set_loss_rate(50);
    if(result<0){
         return -1;
    }
@@ -73,11 +73,21 @@ int mic_tcp_bind(int socket, mic_tcp_sock_addr addr)
  * Met le socket en état d'acceptation de connexions
  * Retourne 0 si succès, -1 si erreur
  */
-int mic_tcp_accept(int socket, mic_tcp_sock_addr* addr)
+/*int mic_tcp_accept(int socket, mic_tcp_sock_addr* addr)
 {
     printf("[MIC-TCP] Appel de la fonction: ");  printf(__FUNCTION__); printf("\n");
     return 0;
+}*/
+int mic_tcp_accept(int socket, mic_tcp_sock_addr* addr)
+{
+    printf("[MIC-TCP] Appel de la fonction: %s\n", __FUNCTION__);
+    mic_tcp_sock *s = get_socket(socket);
+    if (s == NULL) return -1;
+    s->state = ESTABLISHED;
+    return 0;
 }
+
+
 
 /*
  * Permet de réclamer l’établissement d’une connexion
@@ -114,15 +124,17 @@ int mic_tcp_send (int socket, char* mesg, int mesg_size)
     pdu.header.dest_port = s->remote_addr.port;
     pdu.payload.data = mesg;
     pdu.payload.size = mesg_size;
+    pdu.header.ack=0;
     pdu.header.seq_num = current_seq_num;
 
      unsigned long timeout = 1000;
      mic_tcp_pdu pdu_ack;
+     int result;
     // Envoyer pdu et attendre ACK (Stop & Wait)
-    do{
+    /*do{
         IP_send(pdu, s->remote_addr.ip_addr);
         int result = IP_recv(&pdu_ack, &s->local_addr, &s->remote_addr, timeout);
-        printf(result);
+        printf("Résultat de IP_recv : %d\n", result);
         if(result >= 0) {
             printf("On a reçu un pdu_ack\n");
         } else {
@@ -130,7 +142,39 @@ int mic_tcp_send (int socket, char* mesg, int mesg_size)
         }
         printf("on a envoyé pdu et on att le ack\n");
         printf("on a reçu un pdu_ack avec: header.ack = %d et ack_num = %d; on avait current_seq_num = %d\n", pdu_ack.header.ack, pdu_ack.header.ack_num, current_seq_num);
-    }while(!(pdu_ack.header.ack==1) && !(pdu_ack.header.ack_num==current_seq_num));
+    } while (!(pdu_ack.header.ack == 1 && pdu_ack.header.ack_num == current_seq_num));*/
+    int max_retries = 10;
+    int retry_count = 0;
+
+    // Stop & Wait avec limite de retries
+    do {
+        printf("Tentative %d: Envoi du paquet seq_num=%d\n", retry_count + 1,current_seq_num);
+        
+        IP_send(pdu, s->remote_addr.ip_addr);
+        result = IP_recv(&pdu_ack, &s->local_addr, &s->remote_addr, timeout);
+        
+        if (result >= 0) {
+            printf("ACK reçu: ack=%d, ack_num=%d (attendu: %d)\n", 
+                   pdu_ack.header.ack, pdu_ack.header.ack_num, current_seq_num);
+            
+            // Vérification de l'ACK
+            if (pdu_ack.header.ack == 1 && pdu_ack.header.ack_num == current_seq_num) {
+                printf("ACK correct reçu!\n");
+                break;
+            } else {
+                printf("ACK incorrect - ignoré\n");
+            }
+        } else {
+            printf("Timeout - retry %d/%d\n", retry_count + 1, max_retries);
+        }
+        
+        retry_count++;
+        
+    } while (retry_count < max_retries);
+     if (retry_count >= max_retries) {
+        printf("Échec de transmission après %d tentatives\n", max_retries);
+        return -1;
+    }
     printf("y a pas eu de perte\n");
    
     // Alterner le num de sequence
@@ -180,7 +224,20 @@ int mic_tcp_close (int socket)
 void process_received_PDU(mic_tcp_pdu pdu, mic_tcp_ip_addr local_addr, mic_tcp_ip_addr remote_addr)
 {
     printf("[MIC-TCP] Appel de la fonction: "); printf(__FUNCTION__); printf("\n");
-
+     // Trouver le socket correspondant
+    int socket_fd = -1;
+    for (int i = 0; i < MAX_SOCKET; i++) {
+        if (tab[i].state != CLOSED && 
+            tab[i].local_addr.port == pdu.header.dest_port) {
+            socket_fd = i;
+            break;
+        }
+    }
+    
+    if (socket_fd == -1) {
+        printf("Socket non trouvé pour le port %d\n", pdu.header.dest_port);
+        return;
+    }
     if (pdu.header.seq_num == expected_seq_num) {
         // Ajouter la donnée au buffer de réception
         app_buffer_put(pdu.payload);
